@@ -1,5 +1,6 @@
 # *Importheus*
 by. F. Wimbauer, 2026, florian.wimbauer@tum.de
+Chair of Network Architecture and Services, TUM I8
 
 This tool is intended to simplify the import process of 
 internet Measurement data of various types into a ClickHouse

@@ -1,7 +1,6 @@
 # Import of other files
 from core.decomp import Decomp
 from util.dataclasses.Instruct import Instruct
-from util.dataclasses.dataContainer import DataContainer
 
 # Import std Libs
 from zipfile import ZipFile

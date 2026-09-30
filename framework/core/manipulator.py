@@ -1,12 +1,12 @@
 # My files
-from util.dataclasses.baseclass import base
+from util.dataclasses.baseclass import Base
 from util.dataclasses.dataContainer import DataContainer
 
 # Libs
 import logging
 
 
-class Manipulator(base):
+class Manipulator(Base):
     """
     
     """

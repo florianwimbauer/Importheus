@@ -1,9 +1,6 @@
 # Executors for import_type=blacklist
 
 # THIS NEEDS TO BE HERE in order for the cold swappable Plug-Ins to work properly
-import core.Decompressor
-import core.Rowizer
-import core.Analyzer
 
 from singleImport import Execution
 
@@ -22,6 +19,7 @@ class BlacklistExec(Execution):
         # This Import type makes use of all stages
         handler = self.decode_stage()
         handler = self.rowize_stage(handler, "csv") # TODO dynamic from file ending
+        handler = self.tablecheck_stage(handler)
         handler = self.analyze_stage(handler)
         handler = self.manipulator_stage(handler)
         self.import_stage(handler)

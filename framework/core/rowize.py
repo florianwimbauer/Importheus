@@ -1,13 +1,13 @@
-from abc import ABC, abstractmethod
+from abc import ABC
 
 from util.dataclasses.Instruct import Instruct
-from util.dataclasses.baseclass import base
+from util.dataclasses.baseclass import Base
 import logging
 
 from util.dataclasses.dataContainer import DataContainer
 
 
-class Rowize(base, ABC):
+class Rowize(Base, ABC):
     """
     Abstract Mother Class
     Part of the pipeline. Takes file like TextIO Stream from decompression stage and converts it into a
@@ -26,7 +26,7 @@ class Rowize(base, ABC):
     # globally create the DataContainer for this file because we prepare it in multiple functions
     returner: DataContainer
 
-    # meta-data for this file from the JSON (for the setDate Column)
+    # metadata for this file from the JSON (for the setDate Column)
     meta: Instruct = None
 
     def __init__(self, instruction: Instruct):

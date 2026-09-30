@@ -5,7 +5,7 @@ import sys
 
 def load_all_rowizers():
     """
-    imports all files in this directory so that new importers can be added on the fly
+    imports all files in this directory so that new rowizers can be added on the fly
 
     """
     package = sys.modules[__name__]

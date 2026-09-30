@@ -3,18 +3,15 @@
 # This script is for the whole setup process of hermes after a reboot. Only the mount of the download Data in /mnt needs to be done from olympus and is thus not represented in this script
 # should be executed with sudo to be sure everything goes well
 
-# Change Directory to root folder for safety
-cd /
-
 # Installs the special version of python with all the dependencies that are needed in my framework
 if [ -z "$(ls -A /venv 2>/dev/null)" ]; then
     echo "INSTALLING PYTHON3"
     python3 -m venv venv
     source venv/bin/activate
-    pip install clickhouse-connect pandas zstandard pyyaml
+    pip install -r requirements.txt
 fi
 
-### This script sets up the ClickHouse Environment on hermes
+### This script sets up the ClickHouse Environment on the node
 ##  see https://clickhouse.com/docs/install
 if ! command -v clickhouse >/dev/null 2>&1; then
     echo "INSTALLING CLICKHOUSE"

@@ -3,6 +3,8 @@
 # Libs
 import argparse
 import json
+from xmlrpc.client import DateTime
+
 import yaml
 import logging
 import sys
@@ -89,16 +91,61 @@ def readCLI() -> argparse.Namespace:
         prog='importheus',
         description='An efficient Data Importer for Internet Measurement Data into ClickHouse Databases',
         epilog='by F. Wimbauer')
-    # All possible arguments that can be displayed
-    parser.add_argument('JSON', help="JSON with files to import")
-    parser.add_argument('-l', '--logfile', help='File where the logs should be stored', type=str)
-    parser.add_argument('-p', '--parallelism', help='How parallel you want your import', default=1, type=int)
-    parser.add_argument('-v', '--verbose', action='store_true')
-    parser.add_argument('-chu', '--clickhouse_user', help='Clickhouse Username', type=str)
-    parser.add_argument('-chp', '--clickhouse_password', help='Clickhouse Password', type=str)
-    parser.add_argument('-b', '--batchsize', help='#lines should one CH-Import contain (memory!)',
-                        default=1000, type=int)
-    parser.add_argument('-f', '--force', help='Force import without Double-Import Check', type=bool)
 
-    args = parser.parse_args()
-    return args
+    parser.add_argument('-l', '--logfile', help='File where the logs should be stored', type=str)
+    parser.add_argument('-v', '--verbose', action='store_true')
+
+    subparsers = parser.add_subparsers(
+        dest='mode',
+        required=True,
+        help='Importheus Usermodes'
+    )
+
+    """
+    Import-Mode
+    This mode is the standard mode that triggers the import-pipeline of the tool.
+    Needs a preproduced JSON file as instructions to know which files to import
+    """
+
+    parser_import = subparsers.add_parser(
+        name='import',
+        help='Imports from JSON Configuration'
+    )
+
+    # All possible arguments that the import-mode may use
+    parser_import.add_argument('JSON', help="JSON with files to import")
+    parser_import.add_argument('-p', '--parallelism', help='How parallel you want your import', default=1, type=int)
+    parser_import.add_argument('-chu', '--clickhouse_user', help='Clickhouse Username', type=str)
+    parser_import.add_argument('-chp', '--clickhouse_password', help='Clickhouse Password', type=str)
+    parser_import.add_argument('-b', '--batchsize', help='#lines should one CH-Import contain (memory!)',
+                        default=1000, type=int)
+    parser_import.add_argument('-f', '--force', help='Force import without Double-Import Check', type=bool)
+    parser_import.add_argument('-chd', '--clickhouse_database',
+                        help='Specific Database inside the ClickHouse Server', type=str, default='default')
+    parser_import.add_argument('-r', '--retry', help='Amount of retries to import this file after CH-overflow. '
+                                              'Default 5 times',type=int, default=5)
+    parser_import.add_argument('-o', '--optional',
+                               help='All fields are optional, Analyzer ignores empty values', type=bool, default=False)
+
+    """
+    Preparation Mode
+    This mode is able to recusrively generate a Instruction-JSON for the Import-Mode by giving it a filepath and
+    the other parameters needed for the JSON
+    """
+
+    parser_prepare = subparsers.add_parser(
+        name='prepare',
+        help='Generates JSON for import-mode from filepath'
+    )
+
+    # All possible arguments that the preparation-mode may use
+    parser_prepare.add_argument('path', help="path to import-file(s) / directory ")
+    parser_prepare.add_argument('type', help="Import-type of this directory or file")
+    parser_prepare.add_argument('table', help="Destination table of this directory or file")
+    parser_prepare.add_argument('date', help="Import Date YYYY-MM-DD", type=str, nargs='?',
+                               default=None)
+    parser_prepare.add_argument('output', help='desired output JSON', type=str, nargs='?'
+                                , default='./instruct.json')
+    parser_prepare.add_argument('-b', help="Batchsize for JSON elements per file", type=int, default=1000)
+
+    return parser.parse_args()

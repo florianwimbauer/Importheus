@@ -1,11 +1,10 @@
 from abc import ABC, abstractmethod
 
-from util.dataclasses.Instruct import Instruct
-from util.dataclasses.baseclass import base
+from util.dataclasses.baseclass import Base
 import logging
 
 
-class Decomp(base, ABC):
+class Decomp(Base, ABC):
     """
     abstract Decompressor class where every specific File-Decompressor derives from
     """

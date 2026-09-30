@@ -3,7 +3,7 @@
 import logging
 from tqdm import tqdm
 
-from core.clickhouse import TableCreator, CollCreator
+from util.dataclasses.tableLogistic import TableCreator, CollCreator
 
 
 class TqdmLoggingHandler(logging.Handler):

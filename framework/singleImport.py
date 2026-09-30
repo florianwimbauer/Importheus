@@ -1,15 +1,20 @@
 # File the orchestrates the import of one file
 from abc import ABC, abstractmethod
-from typing import Any
 
+from tablecheck import TableCheck
 # My files
-from core.clickhouse import ChAccess, ClickHouse
+from util import CHtools
+from core.importer import Importer
 from util.dataclasses.Instruct import Instruct
-from core.analyzer import AnalyzeRegistry
 from core.decomp import DecompRegistry
 from core.manipulator import Manipulator
 from core.rowize import RowizerRegistry
+from core.analyzer import Analyzer
 from util.dataclasses.dataContainer import DataContainer
+
+# THIS NEEDS TO BE HEERE for the imports & registrys to work properly
+import core.Decompressor
+import core.Rowizer
 
 # Libs
 import logging
@@ -18,24 +23,46 @@ import os
 # list with handles that need to be closed after each file to prevent leaks and safe space
 to_free: list = []
 
-def singleImport(args: Instruct, database: ChAccess, batchsize: int) -> None:
+def singleImport(args: Instruct, chtool: CHtools, batchsize: int, retry: int) -> None:
     """
     gets called from the main functions. Chooses the correct Executor and starts its singleExec function
     Needs to be a seperate helper function
     Args:
         args: Instruction element for this file
-        database: CHDB where we want to import
+        chtool: CHDB where we want to import
         batchsize: for the max. batch import size to CHDB
+        retry: amount of import-retrys in case of ClickHouse Overflow
 
     Returns: nothing
 
     """
     logger = logging.getLogger("importheus.preexecutor")
+    logger.info(f"--- Start of file {args.filepath} ---")
+
+    # Test if this file exists / the path is valid
+    if not os.path.exists(args.filepath):
+        logger.error(f"File {args.filepath} does not exist. Skipping this file")
+        args.bad = True
+        return
+
     try:
         right_executor = ExecutorsRegistry.get_executor(import_type=args.type)
-        executor = right_executor(database, args, batchsize)
-        logger.info(f"--- Start of file {args.filepath} ---")
+        executor = right_executor(chtool, args, batchsize)
         executor.single_exec()
+
+        # There is a Merge-Tree Overflow and we need to reimport this file again
+        while args.do_re_import and retry > 0:
+            logger.warning("Re-Import-Flag set. Reimporting this file.")
+            retry -= 1
+            args.do_re_import = False  # will be put to True internally if another overflow occurs
+            args.bad = False
+            # Start Reimport
+            executor.single_exec()
+        # Catch cascading problems
+        if args.do_re_import:
+            logger.error("Re-Import of this file failed 5 times. Aborting")
+            args.bad = True
+
         logger.info("--- End of file ---")
     except TypeError:
         logger.error(f"No import procedure for import_type \"{args.type}\" known! Skipping this file!")
@@ -46,33 +73,28 @@ class Execution(ABC):
     # String for plugin-feature. will be set in subclass
     import_type: str
 
-    # The ClickHouse Pipeline Instance that we will use with the credentials
-    clickhouse: ClickHouse
-
-    # The import instructions for this file
-    instructions: Instruct
-
     # the logger for this pipeline stage
     logger = logging.getLogger("importheus.executor")
 
-    def __init__(self, database: ChAccess, args: Instruct, batchsize: int):
+    def __init__(self, chtool: CHtools, args: Instruct, batchsize: int):
         """
         Constructor
         Args:
-            database: the ChAccess element to the ClickHouse Database
+            chtool: CHtool for accessing the connected ClickHouse database
             args: the Instruct Element for this file
             batchsize: max. size of batch that shall be imported
         """
-        self.clickhouse = ClickHouse(database, args, batchsize)
-        self.instructions = args
+        self.chtool = chtool # the CHtool Instance that we will use with the credentials
+        self.instructions = args # the import instructions for this file
+        self.batchsize = batchsize # site of import batch
 
     @abstractmethod
     def single_exec(self) -> None:
         """
-        orchestrates the import of one file. optimized for parallel execution in multiple instances (not internally)
-        called from main for each file that needs to be imported
-        needs full information for the import (gets it from the class instance)
-        Implemented in subclasses for each specific import type
+        orchestrates the import of one file. optimized for parallel execution in multiple instances (not internally).
+        Called from main for each file that needs to be imported.
+        Needs full information for the import (gets it from the class instance)
+        Implemented in subclasses for each specific import-type
 
         """
         pass
@@ -104,12 +126,12 @@ class Execution(ABC):
             decompressor = right_decompressor()  # instantiate the suitable decompressor for the file type
             return decompressor.execute(self.instructions)  # decompressing
         except TypeError:
-            self.logger.error(f"File-Ending \"{file_ending}\" can not be decompressed - no suitable decompressor known")
+            self.logger.warning(f"File-Ending \"{file_ending}\" can not be decompressed - no suitable decompressor known")
             return None  # go to next execution (skip this file)
             # execution of this file is not stopped here - maybe the rowizer can do something directly
-            # if not, he sets it to bad in the instruct -> then will be moved on
+            # if not, he sets it to bad in the Instruct -> then will be moved on
 
-    def rowize_stage(self, data, file_ending: str = None) -> DataContainer | None:
+    def rowize_stage(self, data, file_ending: str = "") -> DataContainer | None:
         """
         Wrapper method for Rowizing stage. Call in subclass-Executors if this import-type needs a rowizer
         Args:
@@ -131,6 +153,23 @@ class Execution(ABC):
             self.instructions.bad = True # analyzer won't be able to do something in this case
             return None  # go to next execution (skip this file)
 
+    def tablecheck_stage(self, data) -> DataContainer | None:
+        """
+        Wrapper method for TableCheck stage. Call in subclass-Executors if this import-type needs a tablecheck
+        Args:
+            data: rowized DataContainer (either manually created or from rowizer)
+
+        Returns: dataConatiner with filled header-fields with the guarantee that there is a suitable table for it
+        in the desired database
+
+        """
+        if self.instructions.bad:
+            return None
+
+        self.logger.info("Check Table...")
+        tablechecker = TableCheck(self.chtool, self.instructions)
+        return tablechecker.execute(data)
+
     def analyze_stage(self, data: DataContainer) -> DataContainer | None:
         """
         Wrapper method for Analyzing stage. Call in sublclass-Executor if this import-type needs an analyzer
@@ -144,18 +183,12 @@ class Execution(ABC):
             return None
 
         self.logger.info("Analyzing...")
-        try:
-            right_analyzer = AnalyzeRegistry.get_analyzer(self.instructions.type)
-            analyzer = right_analyzer(database=self.clickhouse, meta=self.instructions)
-            return analyzer.execute(data)
-        except TypeError:
-            self.logger.error(
-                f"Import Type \"{self.instructions.type}\" can not be analyzed - no suitable analyzer known")
-            return data
+        analyzer = Analyzer(chtool=self.chtool, meta=self.instructions)
+        return analyzer.execute(data)
 
-    def manipulator_stage(self, data: DataContainer) -> DataContainer:
+    def manipulator_stage(self, data: DataContainer) -> DataContainer | None:
         """
-        Wrapper method for Manipulator stage. Call in subclass-Executor if this import-type needs an manipulator
+        Wrapper method for Manipulator stage. Call in subclass-Executor if this import-type needs a manipulator
         Args:
             data: dataContainer (can not take raw file-stream data!)
 
@@ -180,7 +213,7 @@ class Execution(ABC):
             return None
 
         self.logger.info("Importing to ClickHouse...")
-        self.clickhouse.execute(data)
+        Importer(self.instructions, self.batchsize, self.chtool).execute(data)
         self.instructions.wind_down() # close all files (executed after the stream is consumed)
         return None
 

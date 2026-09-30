@@ -5,9 +5,10 @@ from tqdm import tqdm
 from multiprocessing import Pool
 from functools import partial
 
+from extension.JSONgenerator import JSONGenerator
 # my files
-from core.clickhouse import ChAccess
 from singleImport import singleImport
+from util.CHtools import CHtools, ChAccess
 from util.dataclasses.Instruct import Instruct
 from util.CLIutil import readCLI, read_input
 from util.logsetup import setup_logging
@@ -27,6 +28,14 @@ def main() -> None:
     logger = setup_logging(args.verbose)
     logger.info("Importheus by F. Wimbauer")
 
+    if args.mode == "prepare":
+        # We are in the JSON-generator mode
+        logger.info("Initiate Importheus JSON-Generator mode...")
+        JSONGenerator(args.path, args.type, args.table, args.date, args.output).generateJSON()
+        return # finished after this
+
+    # This is the import-mode
+
     # Create Instruction List from JSON file
     logger.info("Read Instruction file...")
     to_import: list[Instruct] = read_input(args.JSON)
@@ -37,12 +46,19 @@ def main() -> None:
         for elem in to_import:
             elem.force = True
 
+    if args.optional:
+        # Optional flag is set -> we ignore empty field-values globally
+        logger.info("Optional Flag for all files set. Ignoring all empty data-fields on analyzing during this import")
+        for elem in to_import:
+            elem.optional = True
+
     # create database-access-object
     logger.info("Connect to Database...")
-    database = ChAccess(username=args.clickhouse_user, password=args.clickhouse_password)
+    chtool = CHtools(ChAccess(username=args.clickhouse_user, password=args.clickhouse_password,
+                              database=args.clickhouse_database))
 
     # wrap singleImport to only one input (database is always the same, multiprocessing can only handle on arg)
-    single_import_wrapper = partial(singleImport, database=database, batchsize=args.batchsize)
+    single_import_wrapper = partial(singleImport, database=chtool, batchsize=args.batchsize, retry=args.retry)
 
     logger.info("Setup SUCCESS. Starting file processing...")
 
@@ -59,7 +75,7 @@ def main() -> None:
         it: int = 0
         elem: Instruct
         for elem in tqdm(to_import, desc="Process files"):
-            singleImport(elem, database, args.batchsize)
+            singleImport(elem, chtool, args.batchsize, args.retry)
             it += 1
 
 

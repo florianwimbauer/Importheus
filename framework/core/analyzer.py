@@ -1,22 +1,19 @@
 # My files
-from typing import Generator
-
-from core.clickhouse import ClickHouse, TableCreator, CollCreator
+from util.dicts import typeDict
+from util.dicts.import_types import (import_table_schemes, setDate_scheme)
+from util.CHtools import CHtools
 from util.dataclasses.Instruct import Instruct
-from util.dataclasses.baseclass import base
+from util.dataclasses.baseclass import Base
+from util.dataclasses.dataContainer import DataContainer
+from util.logsetup import logTable, logtable_name
+from util.dicts.typeDict import typeDictPydantic
 
 # Lib
 import logging
+from typing import Generator
 from datetime import datetime
-from abc import ABC
-import copy
 
-from util.dataclasses.dataContainer import DataContainer
-from util.logsetup import logTable, logtable_name
-from util.typeDict import typeDict
-
-
-class Analyzer(base, ABC):
+class Analyzer(Base):
     """
     Second stage after Decoding. Class that analyzes the raw dataContainer that comes from the Rowizer and checks
     for broken lines, unconventional things and potential problems.
@@ -26,51 +23,30 @@ class Analyzer(base, ABC):
     # Get logger for this stage
     logger = logging.getLogger("importheus.analyzer")
 
-    # Type of the Analyzer, overwritten from subclass
-    import_type: str
+    # overwritten from child-class
+    import_type = "basecase"
 
-    # Definition on the layout of the type-table, overwritten from subclass (includes setDate)
-    table: TableCreator
-
-    # Database that is used to create tables and to insert to import-log
-    database: ClickHouse
-
-    # Instructions from the JSON that are used for this file (the logtable uses it)
-    meta: Instruct
-
-    # The columns list defined in the subclass
-    columns: list[CollCreator]
-
-    # Returner
-    returner: DataContainer
-
-    # Manual Header (can be set in subclass when file does not container headers)
-    manual_header: list[str] = None
-
-    def __init__(self, database: ClickHouse, meta: Instruct):
+    def __init__(self, chtool: CHtools, meta: Instruct):
         """
-        Constructor that sets the clickhouse handler for the analyzer
+        Constructor that sets the variables and gets the table information from the import_table_scheme.
         Args:
-            database: the clickhouse handler
+            chtool: to work with clickhouse (for the logtable entry)
+            meta: Instruct element to have context over the import (header field)
         """
-        self.database = database
+        # chtool to work with import-log of the ClickHouse Database
+        self.chtool = chtool
+
+        # Instructions from the JSON that are used for this file (the logtable uses it)
         self.meta = meta
-        self.table = TableCreator(name=meta.table, columns=copy.copy(self.columns))
+
         self.returner = DataContainer()
 
-        if self.meta.table != logtable_name:
-            # we append the obligatory setDate Column (except it is a logtable)
-            self.table.columns.append(CollCreator("setDate", "String"))  # TODO DateTime
+        # column list that gets filled from the official table-scheme
+        self.column_reference = import_table_schemes.get(meta.type, []).copy()
 
-    def __init_subclass__(cls, **kwargs):
-        """
-        hook that registers subclasses on definition in the AnalyzeRegistry for easy plug and play of new analyzers
-        Args:
-            **kwargs: debug
-        """
-        ext = cls.import_type
-        if ext:
-            AnalyzeRegistry.register(ext, cls)
+        if self.meta.table != logtable_name:
+            # append the obligatory setDate Column (except if it is a logtable)
+            self.column_reference.append(setDate_scheme)
 
     def logtable(self, good: int, bad: int) -> None:
         """
@@ -83,131 +59,67 @@ class Analyzer(base, ABC):
             bad: error-rows that this file threw on import
         """
 
-        if not self.database.table_exists(logtable_name):
-            self.database.create_table(logTable)
+        if not self.chtool.table_exists(logtable_name):
+            self.chtool.create_table(logTable)
 
         # Inserting the data
         # TODO generating correct UUID / Index
         data = [0, datetime.now(), self.meta.filepath, self.meta.type, self.meta.table, good + bad, good, bad]
-        self.database.insert_row(logtable_name, data)
+        self.chtool.insert_row(logtable_name, data)
 
-    def _head_list(self) -> dict[str, str]:
-        """
-        helper function that extracts the column-types from the TableBuilder in the subclass for easier checking
-        it ignores the setDate because it is artificially added
-        Returns: dict of columns names mapped to the types from our table
-
-        """
-        returner: dict[str, str] = {}
-        for elem in self.columns:
-            returner.update({elem.name: elem.type})
-        return returner
-
-    def checkHeader(self, header: list) -> bool:
-        """
-        helper function for execute() that analyzes the integrity of the header of a file
-        Returns true if header fields are complete and in line with the planned ClickHouse table
-        Returns false if header fields are missing, empty or not in line with planned ClickHouse table
-        Different arrangement is ok and returns true
-        Args:
-            header: the header of the file that should be analyzed
-
-        Returns: bool if we can proceed analyzing the rows or if the desired type does not match with the actual data
-
-        """
-        should_be: list[str] = list(self._head_list().keys())
-        if len(header) != len(should_be):
-            # Header is not as long as expected, print reference where something went wrong
-            self.logger.error(f"File seems to have unmatching header length for a {self.import_type}. "
-                              f"There are {len(header)} fields "
-                              f"but we expect {len(should_be)} fields. Look at them:\n"
-                              f"Actual:   {header}\n"
-                              f"Expected: {should_be}\n")
-            return False
-        # iterate over every item in the template and search it in the header
-        for i, elem in enumerate(self.columns):
-            if elem.name not in header:
-                self.logger.error(f"File seems to not be the expected type. Header fields do not contain field "
-                                  f"\"{elem.name}\" that is expected from table definition")
-                return False
-            if typeDict.get(self.columns[i].type) is None:
-                self.logger.error(f"Header name \"{header[i]}\" in column {i} with CH-type "
-                                  f"\"{self.table.columns[i].type}\" is unknown in typeDict! "
-                                  f"Please update the typeDict with this type!")
-                return False
-        # If no errors occurred -> return true
-        return True
-
-    def checkRow(self, row: dict[str, str], it: int) -> bool:
+    def checkRow(self, row: dict[str, str], it: int, headlength: int) -> bool:
         """
         helper function for execute() that analyzes the integrity of one row of data.
         Returns true if all fields are filled and the syntax & data-types are correct
         Returns false if there are empty fields, wrong syntax or wrong data-types
-        Can be in the generic class because of the typeDict that handles the data
-        potential parallelism
+        typeDict that handles the data
         Args:
-            row: one row as a dict[name: str, type: str]
+            row: the singular data row that should be checked for integrity
+            it: id of the given row (for error-messages)
+            headlength: how long the line should be / how long the header is (1:1 comparison)
 
-        Returns: bool if the row is intact or should go into the err-list
+        Returns: bool if this row is acceptable or not
 
         """
         # Check if the length of the row is the same as expected
-        should_be = len(list(self._head_list().keys()))
-        if should_be != len(row)-1:
+        # This is independent of optional fields as we require optional fields to be empty, not non-existent.
+        # Each row must have the same length
+        if headlength != len(row):
             # if not -> instant err
-            self.logger.error(f"Row {it} has {len(row)} elements but should have {should_be}")
+            self.logger.info(f"Row {it-1} has {len(row)} elements but should have {headlength}")
             return False
 
-        dictus: dict[str, str] = {col.name: col.type for col in self.table.columns}
+        dictus: dict[str, str] = {col.name: col.type for col in self.column_reference}
         # Iterate over every item in the row and check if it matches the datatype described in the header
         for i, (name, value) in enumerate(row.items()):
-            if value == "" or value == " ":
+            # Check for empty fields with optional-conditions
+            if (value == "" or value == " ") and not self.meta.optional:
                 # Field is empty
-                self.logger.error(f"Row {it} has an empty value for \"{name}\"")
+                self.logger.debug(f"Row {it-1} has an empty value for \"{name}\"")
+                if self.column_reference[i].optional:
+                    self.logger.info(f"Row {it-1} has an empty value for \"{name}\" but can be optional. Ok.")
+                    return True
+                # Field must not be optional -> bad row
                 return False
-            try:
-                # Check if we know this name in the typeDict
-                if typeDict.get(dictus[name])(value):
-                    continue  # there is no problem -> next field
-            except ValueError:
-                # ignore the error specifics
-                pass
-            # We had a problem wit the cast -> this field is not as we want it to be
-            self.logger.error(f"Element {i} of row {it} has an invalid item. "
-                              f"Should be \"{name}\" but looks like \"{value}\"")
-            return False
+            # CHECK THE VALUE FOR PLAUSIBILITY
+            # Check if we know this name in the typeDict
+            if typeDictPydantic.get(dictus[name]) is not None:
+                # Type is known
+                if typeDict.validate_value(dictus[name], value):
+                    continue # there is no problem, value is as expected -> next field
+                else:
+                    # We had a problem wit the cast -> this field is not as we want it to be
+                    self.logger.error(f"Element {i} of row {it - 1} has an invalid item. "
+                                  f"Should be \"{name}\" but looks like \"{value}\"")
+                    return False
+            else:
+                # This type is not in the typeDict -> error (should not be able to happen!)
+                self.logger.error(f"The requested type {dictus[name]} is not in the TypeDict. This should "
+                                  f"not be able to happen. Add all data-types of import-type {self.meta.type} to the typeDict!")
+                return False
 
         # If no errors occurred -> return true
         return True
-
-    def build_table(self) -> None:
-        """
-        creates the table for this type if it is not already created.
-        if the table is already existent, it checks if the syntax is as expected
-        needs to be here because we need the table-type information from the specific Analyzer
-
-        """
-        if not self.database.table_exists(self.meta.table):
-            # not existing: create with self.tableCreator
-            self.database.create_table(self.table)
-        else:
-            # table name already existing, we need to check for syntax match
-
-            # Check Column-Names (need not be in order)
-            ch_names: set[str] = set(list(self.database.get_table_scheme(self.meta.table).keys()))
-            our_names: set[str] = set(self._head_list().keys())
-            if ch_names != our_names:
-                self.logger.critical(f"Table {self.meta.table} already exists but has different column names\n"
-                                     f"Expected: {our_names}\n"
-                                     f"Actual:   {ch_names}")
-
-            # Check Column-Types
-            ch_types: set[str] = set(self.database.get_table_scheme(self.meta.table).values())
-            our_types: set[str] = set(self._head_list().values())
-            if ch_types != our_types:
-                self.logger.critical(f"Table {self.meta.table} already exists but has different datatypes\n"
-                                     f"Expected: {our_types}\n"
-                                     f"Actual:   {ch_types}")
 
     def execute(self, data: DataContainer) -> DataContainer | None:
         """
@@ -219,41 +131,13 @@ class Analyzer(base, ABC):
         Returns: a new DataContainer
 
         """
-        # Check if there is already a header here
-        if not data.head:
-            # No header -> Check if we got one from definition
-            if self.manual_header is not None:
-                # set header from manual definition
-                data.head = self.manual_header
-            else:
-                # we got no header & we got no manual header
-                try:
-                    while not data.head:
-                        # Push Iterator until we get the head
-                        next(data.rawData)
-                except StopIteration:
-                    self.logger.critical(f"Problem with reading header of \"{self.meta.filepath}\". Skipping this file")
-                    self.meta.bad = True
-                    return None
-
-        # Check if the data was imported already before (is filepath in Import-History?)
-        if self.database.lookout(self.meta.filepath, logtable_name, "file"):
-            if not self.meta.force: # we do not want to force the import
-                # there is an entry -> STOP -> no double import
-                self.logger.critical(f"Potential Double Import of file \"{self.meta.filepath}\". Skipping this file")
-                self.meta.bad = True
-                return None
-            else:
-                # double import and force is set -> notify and continue
-                self.logger.info(f"Potential Double Import of file \"{self.meta.filepath}\". Force importing it.")
-
-        if not self.checkHeader(data.head):
-            # the header is not equal to the database-header error message already sent
+        # Check if the import_table_scheme knows this import type
+        if import_table_schemes.get(self.meta.type) is None:
+            # table not known, stop import of this file
+            self.logger.warning(f"Import type {self.meta.type} is not known in the table-dict. "
+                             f"Stop import of file {self.meta.filepath}")
             self.meta.bad = True
             return None
-
-        # Create table for this type if not already happened.
-        self.build_table()
 
         # Check each row of data for syntax problems / empty fields
         def internal_for_yield() -> Generator[dict[str, str]]:
@@ -261,7 +145,7 @@ class Analyzer(base, ABC):
             total_counter: int = 2  # total row-counter for logging in checkRow
             try:
                 for row in data.rawData:
-                    if not self.checkRow(row, total_counter):  # row has a problem
+                    if not self.checkRow(row, total_counter, len(self.column_reference)):  # row has a problem
                         self.returner.error.append(row)  # put in error list of returner & don't yield
                     else:
                         counter += 1  # one mor good row
@@ -277,31 +161,30 @@ class Analyzer(base, ABC):
         # Return the new DataContainer
         return self.returner
 
-
-class AnalyzeRegistry:
-    _registry = {}  # all Analyzers live here
+class AnalyzerRegistry:
+    _registry = {}  # all Sub-Analyzers live here
 
     @classmethod
     def register(cls, import_type: str, analyzer_class: Analyzer) -> None:
         """
-        registers a new analyzer class in the analyzer-registry
-        needs to be done for every new analyzer (that implements a new file type)
+        registers a new decoder class in the decoder-registry
+        needs to be done for every new decoder (that implements a new file type)
 
         Args:
-            import_type: string that describes the file ending (to parse later)
-            analyzer_class: class that contains the analyzing functionality for this class
+            import_type: string that describes the import-type this Analyzer should be used with
+            analyzer_class: class that contains the analyzing functionality for this import-type
 
         """
         cls._registry[import_type] = analyzer_class
 
     @classmethod
-    def get_analyzer(cls, import_type):
+    def get_decomp(cls, ending):
         """
-        factory method that gives you a specific decoder-Object suitable for a specific file ending
+        factory method that gives you a specific decompressor-Object suitable for a specific file ending
         Args:
-            import_type: the file ending you want to decode
+            ending: the file ending you want to decode
 
         Returns: a suitable decoder for this specific file ending
 
         """
-        return cls._registry.get(import_type)
+        return cls._registry.get(ending)

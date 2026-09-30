@@ -11,7 +11,7 @@ class Instruct(BaseModel):
     """
 
     # Elements that are derived from the Instruct JSON in CLIUtil
-    # those need to be there, otherwise a import is not possible
+    # those need to be there, otherwise an import is not possible
 
     filepath: str  # which file shall be imported
     type: str  # which type of import logic to use
@@ -21,11 +21,15 @@ class Instruct(BaseModel):
     date: Optional[str] = Field(default_factory=lambda: datetime.today().strftime("%Y-%m-%d")) # to add to each row
 
     force: bool = False # if set, this file will be imported without check for double imports
+    optional: bool = False # if set (via JSON or Flag), all fields can be optional (empty, not non-existent!)
 
     # only for internal logic - not set by JSON
     bad: bool = False  # if set this file will be skipped by further pipeline stages
-    # i once again tripped over variables vor all instances - stupid
+    # i once again tripped over variables for all instances - stupid
     to_close: list = Field(default_factory=list) # elements that need to be closed
+
+    # stop-condition for re-import
+    do_re_import: bool = False
 
     def wind_down(self):
         """
@@ -34,3 +38,6 @@ class Instruct(BaseModel):
         """
         for elem in self.to_close:
             elem.close()
+            # prepare this Instruct for potential Re-Import (when overflow)
+            self.to_close.remove(elem)
+            self.bad = False

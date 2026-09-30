@@ -1,7 +1,5 @@
 # *Importheus* User Manual
 by. F. Wimbauer, 2026, florian.wimbauer@tum.de
-Bachelor's Thesis for the B.Sc. Informatik at the Technical University of Munich
-Chair of Network Architecture and Services, Prof. Dr.-Ing. Georg Carle
 
 This tool is intended to simplify the import process of 
 internet Measurement data of various types into a ClickHouse
